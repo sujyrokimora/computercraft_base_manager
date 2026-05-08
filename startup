@@ -1,0 +1,5 @@
+while true do
+  shell.run("node")
+  print("Node crashed. Restarting in 3 seconds...")
+  sleep(3)
+end
