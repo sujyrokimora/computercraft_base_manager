@@ -312,6 +312,12 @@ local function heartbeatLoop()
   end
 end
 
+if readSafety().tempC<=-100 then
+  print("Node failed to attach to reactor.\n Rebooting in 3 seconds...")
+  sleep(3)
+  os.reboot()
+end
+
 sendStatus("announce", readSafety())
 
 parallel.waitForAny(
