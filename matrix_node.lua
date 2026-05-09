@@ -5,15 +5,17 @@ local TOKEN = manifest.token
 
 net.openModem()
 
-local matrix = peripheral.wrap("back")
+local matrix = peripheral.find(config.matrixPeripheralType or "inductionPort")
+  or peripheral.find("inductionMatrix")
+  or peripheral.find("inductionMatrixPort")
 
 if not matrix then
   error("No induction matrix peripheral found")
 end
 
 local batteryState = "unknown"
-local lastHeartbeat = 0
 local lastEvent = "none"
+local lastStatus = nil
 
 local function callIfExists(obj, names)
   for _, name in ipairs(names) do
@@ -54,11 +56,15 @@ local function readStatus(event)
     on = true,
     battery = pct,
     batteryState = batteryState,
-    event = event or "none"
+    event = event or "none",
+    assignedReactors = config.assignedReactors
   }
 end
 
 local function broadcastStatus(kind, event)
+  local status = readStatus(event)
+  lastStatus = status
+
   net.broadcast({
     type = kind or "heartbeat",
     auth = TOKEN,
@@ -66,7 +72,19 @@ local function broadcastStatus(kind, event)
     group = config.group,
     machine = config.machine,
     nodeType = "matrix",
-    status = readStatus(event)
+    status = status
+  })
+end
+
+local function ack(id, commandId, ok, message)
+  if not commandId then return end
+
+  net.send(id, {
+    type = "ack",
+    auth = TOKEN,
+    commandId = commandId,
+    ok = ok,
+    message = message
   })
 end
 
@@ -82,6 +100,12 @@ local function printStatus(s)
   end
   print("State: " .. batteryState)
   print("Last event: " .. lastEvent)
+
+  if type(config.assignedReactors) == "table" then
+    print("Reactors: " .. table.concat(config.assignedReactors, ", "))
+  else
+    print("Reactors: all")
+  end
 end
 
 local function handleBattery()
@@ -114,29 +138,56 @@ local function handleBattery()
   return readStatus(event or "none")
 end
 
-broadcastStatus("announce", "none")
+local function handleCommand(id, msg)
+  if type(msg) ~= "table" then return end
+  if msg.auth ~= TOKEN then return end
+  if msg.type ~= "command" then return end
 
-while true do
-  local s = handleBattery()
-  printStatus(s)
+  if msg.action == "status" then
+    ack(id, msg.commandId, true, "Status sent")
+    broadcastStatus("node_status", "none")
 
-  if os.clock() - lastHeartbeat > 10 then
-    lastHeartbeat = os.clock()
-    broadcastStatus("heartbeat", "none")
-  end
-
-  local id, msg = net.receive(1)
-  if id and type(msg) == "table" and msg.auth == TOKEN then
-    if msg.type == "command" and msg.action == "status" then
-      net.send(id, {
-        type = "node_status",
-        auth = TOKEN,
-        name = config.name,
-        group = config.group,
-        machine = config.machine,
-        nodeType = "matrix",
-        status = readStatus("none")
-      })
+  elseif msg.action == "update" then
+    ack(id, msg.commandId, true, "Updating matrix node")
+    local ok, result = net.updateFromManifest("matrix")
+    if not ok then
+      print(result)
+      return
     end
+    os.reboot()
+
+  else
+    ack(id, msg.commandId, false, "Unsupported action: " .. tostring(msg.action))
   end
 end
+
+local function networkLoop()
+  while true do
+    local id, msg = net.receive()
+    handleCommand(id, msg)
+  end
+end
+
+local function matrixLoop()
+  while true do
+    local s = handleBattery()
+    lastStatus = s
+    printStatus(s)
+    sleep(1)
+  end
+end
+
+local function heartbeatLoop()
+  while true do
+    broadcastStatus("heartbeat", "none")
+    sleep(10)
+  end
+end
+
+broadcastStatus("announce", "none")
+
+parallel.waitForAny(
+  networkLoop,
+  matrixLoop,
+  heartbeatLoop
+)

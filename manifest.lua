@@ -6,7 +6,7 @@ local base =
   "https://raw.githubusercontent.com/sujyrokimora/computercraft_base_manager/main/"
 
 return {
-  token = "RonfiasIsHere",
+  token = "CHANGE_ME_SECRET_123",
 
   files = {
     common = base .. "common.lua",

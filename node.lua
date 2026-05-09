@@ -5,47 +5,77 @@ local TOKEN = manifest.token
 
 net.openModem()
 
-local function announce()
+local function status()
+  return {
+    on = redstone.getOutput(config.redstoneSide)
+  }
+end
+
+local function announce(kind)
   net.broadcast({
-    type = "announce",
+    type = kind or "announce",
     auth = TOKEN,
     name = config.name,
     group = config.group,
-    machine = config.machine
+    machine = config.machine,
+    nodeType = "basic",
+    status = status()
   })
 end
 
-announce()
-print("Node online: " .. config.name)
+local function ack(id, commandId, ok, message)
+  if not commandId then return end
 
-local lastHeartbeat = 0
+  net.send(id, {
+    type = "ack",
+    auth = TOKEN,
+    commandId = commandId,
+    ok = ok,
+    message = message
+  })
+end
 
-while true do
-  if os.clock() - lastHeartbeat > 10 then
-    lastHeartbeat = os.clock()
+local function handleCommand(id, msg)
+  if type(msg) ~= "table" or msg.auth ~= TOKEN or msg.type ~= "command" then return end
 
-    net.broadcast({
-      type = "heartbeat",
-      auth = TOKEN,
-      name = config.name,
-      group = config.group,
-      machine = config.machine
-    })
-  end
+  if msg.action == "redstone" then
+    redstone.setOutput(config.redstoneSide, msg.value == true)
+    ack(id, msg.commandId, true, msg.value and "Redstone ON" or "Redstone OFF")
+    announce("node_status")
 
-  local id, msg = net.receive(1)
+  elseif msg.action == "status" then
+    ack(id, msg.commandId, true, status().on and "ON" or "OFF")
+    announce("node_status")
 
-  if id and type(msg) == "table" then
-    if msg.auth ~= TOKEN then
-      print("Rejected unauth command from " .. id)
-    elseif msg.type == "command" and msg.action == "redstone" then
-      redstone.setOutput(config.redstoneSide, msg.value == true)
-
-      if msg.value then
-        print("Redstone ON")
-      else
-        print("Redstone OFF")
-      end
+  elseif msg.action == "update" then
+    ack(id, msg.commandId, true, "Updating basic node")
+    local ok, result = net.updateFromManifest("node")
+    if not ok then
+      print(result)
+      return
     end
+    os.reboot()
+
+  else
+    ack(id, msg.commandId, false, "Unsupported action: " .. tostring(msg.action))
   end
 end
+
+local function networkLoop()
+  while true do
+    local id, msg = net.receive()
+    handleCommand(id, msg)
+  end
+end
+
+local function heartbeatLoop()
+  while true do
+    announce("heartbeat")
+    sleep(10)
+  end
+end
+
+print("Node online: " .. config.name)
+announce("announce")
+
+parallel.waitForAny(networkLoop, heartbeatLoop)
