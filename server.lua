@@ -1,396 +1,327 @@
 local net = require("common")
 local manifest = require("manifest")
-local TOKEN = manifest.token
+
+local cfg = nil
+pcall(function()
+  cfg = require("remote_config")
+end)
 
 net.openModem()
 
-local nodes = {}
-local pendingAcks = {}
-local nextCommandId = 0
-local STALE_AFTER = 30
+local TOKEN = manifest.token
+local SERVER_ID = (cfg and cfg.serverId) or 1
 
-local function isAuthed(msg)
-  return type(msg) == "table" and msg.auth == TOKEN
-end
+local function split(text)
+  local t = {}
 
-local function shallowStatus(msg)
-  if type(msg.status) == "table" then return msg.status end
-  return {}
-end
-
-local function isNodeOnline(node)
-  return (os.clock() - (node.lastSeen or 0)) <= STALE_AFTER
-end
-
-local function decorateNode(node)
-  local copy = {}
-
-  for k, v in pairs(node) do
-    copy[k] = v
+  for word in string.gmatch(text, "%S+") do
+    table.insert(t, word)
   end
 
-  copy.online = isNodeOnline(node)
-
-  if not copy.online then
-    copy.status = copy.status or {}
-    copy.status.offline = true
-  end
-
-  return copy
+  return t
 end
 
-local function registerNode(id, msg)
-  nodes[id] = {
-    id = id,
-    name = msg.name or ("node_" .. id),
-    group = msg.group or "unknown",
-    machine = msg.machine or "unknown",
-    nodeType = msg.nodeType or "basic",
-    lastSeen = os.clock(),
-    status = shallowStatus(msg)
-  }
+local function pad(text, len)
+  text = tostring(text or "")
 
-  print("Registered: " .. nodes[id].name .. " [" .. nodes[id].group .. "/" .. nodes[id].machine .. "/" .. nodes[id].nodeType .. "]")
+  if #text > len then
+    return string.sub(text, 1, len - 1) .. "."
+  end
+
+  return text .. string.rep(" ", len - #text)
 end
 
-local function updateNode(id, msg)
-  if not nodes[id] then
-    registerNode(id, msg)
-    return
-  end
-
-  nodes[id].lastSeen = os.clock()
-  nodes[id].name = msg.name or nodes[id].name
-  nodes[id].group = msg.group or nodes[id].group
-  nodes[id].machine = msg.machine or nodes[id].machine
-  nodes[id].nodeType = msg.nodeType or nodes[id].nodeType
-
-  if msg.status then
-    nodes[id].status = msg.status
-  end
+local function pct(v)
+  if type(v) ~= "number" then return "-" end
+  return tostring(math.floor(v * 100)) .. "%"
 end
 
-local function newCommandId()
-  nextCommandId = nextCommandId + 1
-  return tostring(os.getComputerID()) .. "-" .. tostring(nextCommandId) .. "-" .. tostring(math.floor(os.clock() * 1000))
-end
-
-local function sendToNode(id, action, value)
-  local commandId = newCommandId()
-
-  net.send(id, {
-    type = "command",
-    auth = TOKEN,
-    commandId = commandId,
-    action = action,
-    value = value
-  })
-
-  return commandId
-end
-
-local function commandGroup(group, target, action, value)
-  local sent = {}
-
-  for id, node in pairs(nodes) do
-    if node.group == group and
-       (target == "all" or node.machine == target or node.name == target) then
-      local commandId = sendToNode(id, action, value)
-
-      sent[commandId] = {
-        nodeId = id,
-        name = node.name,
-        group = node.group,
-        machine = node.machine,
-        action = action
-      }
-    end
-  end
-
-  return sent
-end
-
-local function commandReactorsForMatrix(matrixNode, action, value)
-  local assigned = nil
-  local s = matrixNode.status or {}
-
-  if type(s.assignedReactors) == "table" then
-    assigned = {}
-    for _, name in ipairs(s.assignedReactors) do
-      assigned[name] = true
-    end
-  end
-
-  local sent = {}
-
-  for id, node in pairs(nodes) do
-    if node.nodeType == "reactor" or node.group == "reactor" then
-      local shouldSend = false
-
-      if not assigned then
-        shouldSend = true
-      elseif assigned[node.machine] or assigned[node.name] then
-        shouldSend = true
-      end
-
-      if shouldSend then
-        local commandId = sendToNode(id, action, value)
-
-        sent[commandId] = {
-          nodeId = id,
-          name = node.name,
-          group = node.group,
-          machine = node.machine,
-          action = action
-        }
-      end
-    end
-  end
-
-  return sent
-end
-
-local function sendReply(id, ok, message, extra)
-  local reply = {
-    type = "reply",
-    auth = TOKEN,
-    ok = ok,
-    message = message
-  }
-
-  if extra then
-    for k, v in pairs(extra) do
-      reply[k] = v
-    end
-  end
-
-  net.send(id, reply)
-end
-
-local function filteredNodes(group)
-  local out = {}
-
-  for id, node in pairs(nodes) do
-    if not group or node.group == group or node.nodeType == group then
-      out[id] = decorateNode(node)
-    end
-  end
-
-  return out
-end
-
-local function parseAction(args)
-  local text = args[3]
-
-  if text == "on" then
-    return "redstone", true
-  elseif text == "off" then
-    return "redstone", false
-  elseif text == "reset" then
-    return "reset", true
-  elseif text == "status" then
-    return "status", true
-  elseif text == "update" then
-    return "update", true
-  elseif text == "burn" then
-    local rate = tonumber(args[4])
-    if rate then
-      return "burn", rate
-    end
-  end
-
-  return nil, nil
-end
-
-local function waitForAcks(sent, timeout)
-  local results = {}
-  local deadline = os.clock() + (timeout or 3)
-
-  local expected = 0
-  for commandId, info in pairs(sent) do
-    expected = expected + 1
-    results[commandId] = {
-      ok = false,
-      message = "No acknowledgement",
-      node = info
-    }
-  end
-
-  if expected == 0 then
-    return results
-  end
+local function receiveServerReply(timeout)
+  local deadline = os.clock() + timeout
 
   while os.clock() < deadline do
-    for commandId, ack in pairs(pendingAcks) do
-      if results[commandId] then
-        results[commandId] = {
-          ok = ack.ok == true,
-          message = ack.message or "",
-          node = results[commandId].node
-        }
+    local id, msg = net.receive(0.5)
 
-        pendingAcks[commandId] = nil
-
-        expected = expected - 1
-      end
-    end
-
-    if expected <= 0 then
-      break
-    end
-
-    sleep(0.05)
-  end
-
-  return results
-end
-
-local function summarizeAckResults(results)
-  local lines = {}
-  local okCount = 0
-  local failCount = 0
-
-  for _, result in pairs(results) do
-    local nodeName = result.node and result.node.name or "node"
-
-    if result.ok then
-      okCount = okCount + 1
-      table.insert(lines, "OK " .. nodeName .. ": " .. (result.message or "done"))
-    else
-      failCount = failCount + 1
-      table.insert(lines, "FAILED " .. nodeName .. ": " .. (result.message or "failed"))
+    if id == SERVER_ID and
+       type(msg) == "table" and
+       msg.type == "reply" and
+       msg.auth == TOKEN then
+      return msg
     end
   end
 
-  if okCount + failCount == 0 then
-    return "No matching nodes"
-  end
-
-  return table.concat(lines, "\n")
+  return nil
 end
 
-local function handleMatrixAutomation(matrixNode)
-  local s = matrixNode.status or {}
-  local sent = nil
+local function onOff(node)
+  local s = node.status or {}
 
-  if s.event == "battery_low" then
-    sent = commandReactorsForMatrix(matrixNode, "redstone", true)
-    print("Matrix low: requested reactor ON")
-
-  elseif s.event == "battery_high" then
-    sent = commandReactorsForMatrix(matrixNode, "redstone", false)
-    print("Matrix high: requested reactor OFF")
-  end
-
-  -- Do not block matrix event path waiting for acks.
+  if node.online == false or s.offline then return "OFFLN" end
+  if s.lockout then return "LOCK" end
+  if s.on == true or s.active == true then return "ON" end
+  if s.on == false or s.active == false then return "OFF" end
+  return "-"
 end
 
-local function handleUpdateCommand(id, args)
-  local group = args[2]
+local function extra(node)
+  local s = node.status or {}
+  local parts = {}
 
-  if not group or group == "server" then
-    local ok, msg = net.updateFromManifest("server")
-    sendReply(id, ok, msg .. ". Rebooting server.")
-    sleep(0.5)
-    os.reboot()
-    return
+  if type(s.battery) == "number" then table.insert(parts, "bat=" .. pct(s.battery)) end
+  if type(s.tempC) == "number" then table.insert(parts, "temp=" .. math.floor(s.tempC) .. "C") end
+  if type(s.coolant) == "number" then table.insert(parts, "cool=" .. pct(s.coolant)) end
+  if type(s.waste) == "number" then table.insert(parts, "waste=" .. pct(s.waste)) end
+
+  if type(s.burnRate) == "number" then
+    local max = s.maxBurnRate or "?"
+    table.insert(parts, "burn=" .. s.burnRate .. "/" .. max)
   end
 
-  local sent = commandGroup(group, "all", "update", true)
-  local results = waitForAcks(sent, 5)
-  sendReply(id, true, summarizeAckResults(results))
+  if s.batteryState then table.insert(parts, "state=" .. s.batteryState) end
+
+  if type(s.assignedReactors) == "table" then
+    table.insert(parts, "reactors=" .. table.concat(s.assignedReactors, ","))
+  end
+
+  if s.lockoutReason and s.lockoutReason ~= "" then
+    table.insert(parts, "reason=" .. s.lockoutReason)
+  end
+
+  if #parts == 0 then return "" end
+  return table.concat(parts, " ")
 end
 
-local function handleMessage(id, msg)
-  if not id or type(msg) ~= "table" then return end
+local function printNodes(nodes)
+  term.clear()
+  term.setCursorPos(1,1)
 
-  if not isAuthed(msg) then
-    print("Rejected unauth message from " .. id)
-    return
+  print(
+    pad("ID", 4) ..
+    pad("STATE", 6) ..
+    pad("GROUP", 10) ..
+    pad("NAME", 14) ..
+    pad("TYPE", 10) ..
+    "INFO"
+  )
+
+  print(string.rep("-", 70))
+
+  for id, node in pairs(nodes) do
+    print(
+      pad(id, 4) ..
+      pad(onOff(node), 6) ..
+      pad(node.group, 10) ..
+      pad(node.name, 14) ..
+      pad(node.nodeType or "basic", 10) ..
+      extra(node)
+    )
   end
+end
 
-  if msg.type == "ack" then
-    if msg.commandId then
-      pendingAcks[msg.commandId] = msg
-    end
-    return
-  end
+local function printBattery(nodes)
+  term.clear()
+  term.setCursorPos(1,1)
 
-  if msg.type == "announce" then
-    registerNode(id, msg)
+  print("BATTERY STATUS")
+  print(string.rep("-", 48))
 
-  elseif msg.type == "heartbeat" then
-    updateNode(id, msg)
+  local found = false
 
-  elseif msg.type == "node_status" then
-    updateNode(id, msg)
+  for id, node in pairs(nodes) do
+    local s = node.status or {}
 
-    if nodes[id] and nodes[id].nodeType == "matrix" then
-      handleMatrixAutomation(nodes[id])
-    end
+    if node.nodeType == "matrix" then
+      found = true
 
-  elseif msg.type == "client_command" then
-    local args = msg.command or {}
-
-    if args[1] == "list" then
-      sendReply(id, true, "Node list", {
-        nodes = filteredNodes(args[2])
-      })
-
-    elseif args[1] == "status" then
-      sendReply(id, true, "Node status", {
-        nodes = filteredNodes(args[2]),
-        statusOnly = true
-      })
-
-    elseif args[1] == "update" then
-      handleUpdateCommand(id, args)
-
-    elseif #args >= 3 then
-      local group = args[1]
-      local target = args[2]
-
-      local action, value = parseAction(args)
-
-      if not action then
-        sendReply(id, false, "Use: <group> <target> on/off/reset/status/update/burn <rate>")
-      else
-        local sent = commandGroup(group, target, action, value)
-        local results = waitForAcks(sent, 5)
-        sendReply(id, true, summarizeAckResults(results))
-      end
-
-    else
-      sendReply(id, false, "Commands: list [group], status [group], update [group/server], <group> <target> on/off/reset/status/update/burn <rate>")
+      print(
+        pad(node.name, 16) ..
+        pad(pct(s.battery), 8) ..
+        pad(s.batteryState or "-", 10) ..
+        (type(s.assignedReactors) == "table" and table.concat(s.assignedReactors, ",") or "all")
+      )
     end
   end
-end
 
-local function networkLoop()
-  while true do
-    local id, msg = net.receive()
-    handleMessage(id, msg)
+  if not found then
+    print("No matrix nodes found")
   end
 end
 
-local function displayLoop()
-  while true do
-    term.clear()
-    term.setCursorPos(1, 1)
-    print("Central server online")
-    print("Nodes: " .. tostring((function()
-      local c = 0
-      for _ in pairs(nodes) do c = c + 1 end
-      return c
-    end)()))
+local function printHelp(topic)
+  term.clear()
+  term.setCursorPos(1,1)
+
+  if topic == "reactor" then
+    print("REACTOR COMMANDS")
+    print("------------------------------")
+    print("reactor <name> on")
+    print("reactor <name> off")
+    print("reactor <name> status")
+    print("reactor <name> reset")
+    print("reactor <name> burn <rate>")
     print("")
-    print("Commands:")
-    print("  list [group]")
-    print("  status [group]")
-    print("  update [group/server]")
-    print("  <group> <target> on/off/reset/status/update/burn <rate>")
-    sleep(5)
+    print("Examples:")
+    print("reactor main on")
+    print("reactor alpha burn 2.5")
+    print("reactor all status")
+    print("")
+    print("If auto SCRAM triggers, ON and burn")
+    print("are blocked until reset.")
+    return
+  end
+
+  if topic == "battery" or topic == "matrix" then
+    print("BATTERY / MATRIX COMMANDS")
+    print("------------------------------")
+    print("battery")
+    print("battery power")
+    print("status power")
+    print("")
+    print("Matrix automation:")
+    print("<= start %: reactor ON request once")
+    print(">= stop %: reactor OFF request once")
+    return
+  end
+
+  if topic == "update" then
+    print("UPDATE COMMANDS")
+    print("------------------------------")
+    print("update server")
+    print("update reactor")
+    print("update power")
+    print("update farm")
+    print("update all")
+    print("")
+    print("Nodes download latest files")
+    print("from manifest.lua and reboot.")
+    return
+  end
+
+  print("COMMAND HELP")
+  print("------------------------------")
+  print("list")
+  print("list <group>")
+  print("")
+  print("status")
+  print("status <group>")
+  print("")
+  print("watch")
+  print("watch <group>")
+  print("")
+  print("battery")
+  print("battery <group>")
+  print("")
+  print("update server")
+  print("update <group>")
+  print("")
+  print("<group> <target> on")
+  print("<group> <target> off")
+  print("<group> <target> status")
+  print("<group> <target> reset")
+  print("<group> <target> update")
+  print("")
+  print("reactor <name> burn <rate>")
+  print("")
+  print("Examples:")
+  print("farm alloy_X on")
+  print("farm all off")
+  print("reactor main burn 2.5")
+  print("reactor main reset")
+  print("status reactor")
+  print("battery")
+end
+
+local function sendCommand(args, silent)
+  net.send(SERVER_ID, {
+    type = "client_command",
+    auth = TOKEN,
+    command = args
+  })
+
+  local reply = receiveServerReply(5)
+
+  if reply then
+    if reply.nodes then
+      if args[1] == "battery" then
+        printBattery(reply.nodes)
+      else
+        printNodes(reply.nodes)
+      end
+    else
+      if not silent then
+        print(reply.message)
+      end
+    end
+  else
+    if not silent then
+      print("No valid reply from server")
+    end
   end
 end
 
-parallel.waitForAny(networkLoop, displayLoop)
+local function watch(group)
+  while true do
+    local args = {"status"}
+    if group then args[2] = group end
+
+    net.send(SERVER_ID, {
+      type = "client_command",
+      auth = TOKEN,
+      command = args
+    })
+
+    local reply = receiveServerReply(5)
+
+    if reply and reply.nodes then
+      printNodes(reply.nodes)
+      print("")
+      print("Watching " .. (group or "all") .. " - CTRL+T to stop")
+    else
+      term.clear()
+      term.setCursorPos(1,1)
+      print("No valid reply from server")
+      print("CTRL+T to stop")
+    end
+
+    sleep(1)
+  end
+end
+
+term.clear()
+term.setCursorPos(1,1)
+
+print("Wireless terminal ready")
+print("Type 'help' for commands")
+print("")
+
+while true do
+  write("> ")
+
+  local line = read()
+
+  if line == "exit" then
+    break
+  end
+
+  local args = split(line)
+
+  if args[1] == "help" then
+    printHelp(args[2])
+
+  elseif args[1] == "battery" then
+    local group = args[2] or "power"
+    sendCommand({"status", group})
+
+  elseif args[1] == "watch" then
+    watch(args[2])
+
+  elseif args[1] == "update" then
+    if not args[2] then
+      args[2] = "server"
+    end
+    sendCommand(args)
+
+  elseif #args > 0 then
+    sendCommand(args)
+  end
+end
