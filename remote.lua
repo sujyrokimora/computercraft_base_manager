@@ -36,6 +36,23 @@ local function pct(v)
   return tostring(math.floor(v * 100)) .. "%"
 end
 
+local function receiveServerReply(timeout)
+  local deadline = os.clock() + timeout
+
+  while os.clock() < deadline do
+    local id, msg = net.receive(0.5)
+
+    if id == SERVER_ID and
+       type(msg) == "table" and
+       msg.type == "reply" and
+       msg.auth == TOKEN then
+      return msg
+    end
+  end
+
+  return nil
+end
+
 local function onOff(node)
   local s = node.status or {}
 
@@ -221,9 +238,9 @@ local function sendCommand(args, silent)
     command = args
   })
 
-  local id, reply = net.receive(5)
+  local reply = receiveServerReply(5)
 
-  if reply and reply.type == "reply" and reply.auth == TOKEN then
+  if reply then
     if reply.nodes then
       if args[1] == "battery" then
         printBattery(reply.nodes)
@@ -253,9 +270,9 @@ local function watch(group)
       command = args
     })
 
-    local id, reply = net.receive(5)
+    local reply = receiveServerReply(5)
 
-    if reply and reply.type == "reply" and reply.auth == TOKEN and reply.nodes then
+    if reply and reply.nodes then
       printNodes(reply.nodes)
       print("")
       print("Watching " .. (group or "all") .. " - CTRL+T to stop")
