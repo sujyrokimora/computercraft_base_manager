@@ -6,6 +6,7 @@ net.openModem()
 
 local nodes = {}
 local pendingAcks = {}
+local commandQueue = {}
 local nextCommandId = 0
 local STALE_AFTER = 30
 
@@ -207,6 +208,7 @@ local function waitForAcks(sent, timeout)
   local deadline = os.clock() + (timeout or 3)
 
   local expected = 0
+
   for commandId, info in pairs(sent) do
     expected = expected + 1
     results[commandId] = {
@@ -230,7 +232,6 @@ local function waitForAcks(sent, timeout)
         }
 
         pendingAcks[commandId] = nil
-
         expected = expected - 1
       end
     end
@@ -271,26 +272,23 @@ end
 
 local function handleMatrixAutomation(matrixNode)
   local s = matrixNode.status or {}
-  local sent = nil
 
   if s.event == "battery_low" then
-    sent = commandReactorsForMatrix(matrixNode, "redstone", true)
+    commandReactorsForMatrix(matrixNode, "redstone", true)
     print("Matrix low: requested reactor ON")
 
   elseif s.event == "battery_high" then
-    sent = commandReactorsForMatrix(matrixNode, "redstone", false)
+    commandReactorsForMatrix(matrixNode, "redstone", false)
     print("Matrix high: requested reactor OFF")
   end
-
-  -- Do not block matrix event path waiting for acks.
 end
 
-local function handleUpdateCommand(id, args)
+local function handleUpdateCommand(clientId, args)
   local group = args[2]
 
   if not group or group == "server" then
     local ok, msg = net.updateFromManifest("server")
-    sendReply(id, ok, msg .. ". Rebooting server.")
+    sendReply(clientId, ok, msg .. ". Rebooting server.")
     sleep(0.5)
     os.reboot()
     return
@@ -298,14 +296,57 @@ local function handleUpdateCommand(id, args)
 
   local sent = commandGroup(group, "all", "update", true)
   local results = waitForAcks(sent, 5)
-  sendReply(id, true, summarizeAckResults(results))
+  sendReply(clientId, true, summarizeAckResults(results))
+end
+
+local function queueClientCommand(id, msg)
+  table.insert(commandQueue, {
+    id = id,
+    msg = msg
+  })
+end
+
+local function handleClientCommand(id, msg)
+  local args = msg.command or {}
+
+  if args[1] == "list" then
+    sendReply(id, true, "Node list", {
+      nodes = filteredNodes(args[2])
+    })
+
+  elseif args[1] == "status" then
+    sendReply(id, true, "Node status", {
+      nodes = filteredNodes(args[2]),
+      statusOnly = true
+    })
+
+  elseif args[1] == "update" then
+    handleUpdateCommand(id, args)
+
+  elseif #args >= 3 then
+    local group = args[1]
+    local target = args[2]
+
+    local action, value = parseAction(args)
+
+    if not action then
+      sendReply(id, false, "Use: <group> <target> on/off/reset/status/update/burn <rate>")
+    else
+      local sent = commandGroup(group, target, action, value)
+      local results = waitForAcks(sent, 5)
+      sendReply(id, true, summarizeAckResults(results))
+    end
+
+  else
+    sendReply(id, false, "Commands: list [group], status [group], update [group/server], <group> <target> on/off/reset/status/update/burn <rate>")
+  end
 end
 
 local function handleMessage(id, msg)
   if not id or type(msg) ~= "table" then return end
 
   if not isAuthed(msg) then
-    print("Rejected unauth message from " .. id)
+    print("Rejected unauth message from " .. tostring(id))
     return
   end
 
@@ -330,39 +371,7 @@ local function handleMessage(id, msg)
     end
 
   elseif msg.type == "client_command" then
-    local args = msg.command or {}
-
-    if args[1] == "list" then
-      sendReply(id, true, "Node list", {
-        nodes = filteredNodes(args[2])
-      })
-
-    elseif args[1] == "status" then
-      sendReply(id, true, "Node status", {
-        nodes = filteredNodes(args[2]),
-        statusOnly = true
-      })
-
-    elseif args[1] == "update" then
-      handleUpdateCommand(id, args)
-
-    elseif #args >= 3 then
-      local group = args[1]
-      local target = args[2]
-
-      local action, value = parseAction(args)
-
-      if not action then
-        sendReply(id, false, "Use: <group> <target> on/off/reset/status/update/burn <rate>")
-      else
-        local sent = commandGroup(group, target, action, value)
-        local results = waitForAcks(sent, 5)
-        sendReply(id, true, summarizeAckResults(results))
-      end
-
-    else
-      sendReply(id, false, "Commands: list [group], status [group], update [group/server], <group> <target> on/off/reset/status/update/burn <rate>")
-    end
+    queueClientCommand(id, msg)
   end
 end
 
@@ -373,24 +382,30 @@ local function networkLoop()
   end
 end
 
-local function displayLoop()
+local function commandLoop()
+  while true do
+    if #commandQueue > 0 then
+      local item = table.remove(commandQueue, 1)
+      handleClientCommand(item.id, item.msg)
+    else
+      sleep(0.05)
+    end
+  end
+end
+
+local function displayHeader()
   while true do
     term.clear()
     term.setCursorPos(1, 1)
     print("Central server online")
-    print("Nodes: " .. tostring((function()
-      local c = 0
-      for _ in pairs(nodes) do c = c + 1 end
-      return c
-    end)()))
-    print("")
-    print("Commands:")
-    print("  list [group]")
-    print("  status [group]")
-    print("  update [group/server]")
-    print("  <group> <target> on/off/reset/status/update/burn <rate>")
-    sleep(5)
+    print("Queued commands: " .. tostring(#commandQueue))
+    sleep(1)
   end
 end
 
-parallel.waitForAny(networkLoop, displayLoop)
+displayHeader()
+
+parallel.waitForAny(
+  networkLoop,
+  commandLoop
+)

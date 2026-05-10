@@ -111,7 +111,7 @@ local defaultToken = manifest.token or "CHANGE_ME_SECRET_123"
 term.clear()
 term.setCursorPos(1,1)
 
-print("Universal GitHub Auto Configurator")
+print("Universal Auto Configurator")
 print("==================================")
 print("")
 print("1 = basic node")
