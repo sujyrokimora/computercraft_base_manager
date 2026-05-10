@@ -394,13 +394,10 @@ local function commandLoop()
 end
 
 local function displayHeader()
-  while true do
+
     term.clear()
     term.setCursorPos(1, 1)
     print("Central server online")
-    print("Queued commands: " .. tostring(#commandQueue))
-    sleep(1)
-  end
 end
 
 displayHeader()
