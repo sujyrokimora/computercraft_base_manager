@@ -55,7 +55,7 @@ function M.writeFile(path, data)
 end
 
 function M.updateFromManifest(role)
-  local manifest = require("manifest")
+   
   local files = manifest.files or {}
 
   local roleFiles = {

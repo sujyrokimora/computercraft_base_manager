@@ -1,6 +1,7 @@
 local net = require("common")
-local manifest = require("manifest")
-local TOKEN = manifest.token
+ 
+local config = require("server_config")
+local TOKEN = config.password
 
 net.openModem()
 

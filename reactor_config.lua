@@ -1,4 +1,5 @@
 return {
+  password="",
   name = "main_reactor",
   group = "reactor",
   machine = "main",

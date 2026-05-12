@@ -1,7 +1,7 @@
 local net = require("common")
 local config = require("node_config")
-local manifest = require("manifest")
-local TOKEN = manifest.token
+ 
+local TOKEN = config.password
 
 net.openModem()
 
@@ -41,6 +41,7 @@ local function handleCommand(id, msg)
   if msg.action == "redstone" then
     redstone.setOutput(config.redstoneSide, msg.value == true)
     ack(id, msg.commandId, true, msg.value and "Redstone ON" or "Redstone OFF")
+    print("OK redstone setOutput for ",config.redstoneSide, ":", msg.value)
     announce("node_status")
 
   elseif msg.action == "status" then

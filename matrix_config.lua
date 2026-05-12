@@ -1,4 +1,6 @@
 return {
+
+  password = "",
   name = "main_matrix",
   group = "power",
   machine = "matrix",

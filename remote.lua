@@ -1,5 +1,5 @@
 local net = require("common")
-local manifest = require("manifest")
+ 
 
 local cfg = nil
 pcall(function()

@@ -1,5 +1,5 @@
 local DEFAULT_BOOTSTRAP_URL =
-  "https://raw.githubusercontent.com/YOURNAME/cc-system/main/bootstrap_config.lua"
+  "https://raw.githubusercontent.com/sujyrokimora/computercraft_base_manager/main/bootstrap_config.lua"
 
 local function writeFile(path, data)
   local h = fs.open(path, "w")
@@ -124,6 +124,7 @@ print("")
 local mode = ask("Select type", "1")
 
 downloadFile(files.common, "common.lua")
+local newpassd = ask("Change your system password ",defaultToken)
 
 if mode == "1" then
   downloadFile(files.node, "node.lua")
@@ -135,6 +136,7 @@ if mode == "1" then
   local side = ask("Redstone side", "back")
 
   writeFile("node_config.lua", [[return {
+  password = "]] .. newpassd .. [[",
   name = "]] .. name .. [[",
   group = "]] .. group .. [[",
   machine = "]] .. machine .. [[",
@@ -146,12 +148,17 @@ elseif mode == "2" then
   downloadFile(files.server, "server.lua")
   downloadFile(files.startup_server, "startup")
 
+  writeFile("server_config.lua", [[return{
+    password = "]] .. newpassd .. [["
+}]])
+
 elseif mode == "3" then
   downloadFile(files.remote, "remote.lua")
 
   local serverId = ask("Server computer ID", "1")
 
   writeFile("remote_config.lua", [[return {
+  password = "]] .. newpassd .. [[",
   serverId = ]] .. serverId .. [[
 }
 ]])
@@ -168,6 +175,7 @@ elseif mode == "4" then
   local maxWaste = tonumber(ask("Max waste percent", "80")) or 80
 
   writeFile("reactor_config.lua", [[return {
+  password = "]] .. newpassd .. [[",
   name = "]] .. name .. [[",
   group = "]] .. group .. [[",
   machine = "]] .. machine .. [[",

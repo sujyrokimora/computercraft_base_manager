@@ -1,7 +1,7 @@
 local net = require("common")
 local config = require("matrix_config")
-local manifest = require("manifest")
-local TOKEN = manifest.token
+ 
+local TOKEN = config.password
 
 net.openModem()
 

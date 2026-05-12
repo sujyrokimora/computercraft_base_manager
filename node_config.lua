@@ -1,4 +1,5 @@
 return {
+  password="",
   name = "alloy_1",
   group = "farm",
   machine = "alloy_X",
